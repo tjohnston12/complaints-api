@@ -10,8 +10,9 @@
 // PATCH /api/complaints { id, ... }    -> update (assign / status / action / any field) -> { row }
 // POST /api/complaints { action:'upload', id, filename, contentType, data(base64) } -> attach a file
 //
-// Writes require a manager/admin identity header (x-user-role: Owner|Admin|Manager),
-// sent by the front-end from the SSO session. Soft auth, same pattern as the other apps.
+// Reads (GET) are open to anyone with a Complaints session. Writes (POST/PATCH/upload)
+// require a "work records" role, delivered as x-app-role from the SSO session:
+// Admin / Manager / Patroller/Supervisor can write; User is read-only. See canWrite() below.
 //
 // Env: AIRTABLE_PAT (read+write to the base), AIRTABLE_BASE (default below),
 //      COMPLAINTS_TABLE (default table id below).
@@ -146,11 +147,16 @@ function corsOrigin(req) {
   if (/^https:\/\/([a-z0-9-]+\.)*mrdc-htra\.com$/i.test(o)) return o;
   return 'https://www.mrdc-htra.com';
 }
-const isManager = req => {
-  const r = String(req.headers['x-user-role'] || '');
-  const ar = String(req.headers['x-app-role'] || '');
-  return ['Owner', 'Admin', 'Manager'].includes(r) || ['Admin', 'Manager'].includes(ar);
-};
+// Write access = "work records" (log / assign / status / action / attachments).
+// Complaints app roles (from the person's Complaints Role, delivered as x-app-role;
+// Owner resolves to Admin in auth):
+//   Admin, Manager, Patroller/Supervisor  → can work records (write)
+//   User  (or access with no role set)     → read-only (GET only; no write)
+// GET is intentionally ungated so read-only users can view.
+const WRITE_ROLES = ['Admin', 'Manager', 'Patroller/Supervisor'];
+const canWrite = req =>
+  WRITE_ROLES.includes(String(req.headers['x-app-role'] || '')) ||
+  String(req.headers['x-user-role'] || '') === 'Owner';
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', corsOrigin(req));
@@ -178,7 +184,7 @@ module.exports = async function handler(req, res) {
 
     // Attachment upload (POST { action:'upload', ... }) — content API.
     if (req.method === 'POST' && body.action === 'upload') {
-      if (!isManager(req)) return res.status(403).json({ error: 'Managers/admins only' });
+      if (!canWrite(req)) return res.status(403).json({ error: 'You have view-only access to Complaints.' });
       const { id, filename, contentType, data } = body;
       if (!id || !data) return res.status(400).json({ error: 'id and data (base64) required' });
       const up = await fetch(`https://content.airtable.com/v0/${BASE}/${encodeURIComponent(id)}/${F.attachments}/uploadAttachment`, {
@@ -194,7 +200,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (req.method === 'POST') {
-      if (!isManager(req)) return res.status(403).json({ error: 'Managers/admins only' });
+      if (!canWrite(req)) return res.status(403).json({ error: 'You have view-only access to Complaints.' });
       const fields = toFields(body);
       if (!body.status) fields[F.status] = 'Todo';
       if (!body.date)   fields[F.date]   = new Date().toISOString().slice(0, 10);
@@ -206,7 +212,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (req.method === 'PATCH') {
-      if (!isManager(req)) return res.status(403).json({ error: 'Managers/admins only' });
+      if (!canWrite(req)) return res.status(403).json({ error: 'You have view-only access to Complaints.' });
       if (!body.id) return res.status(400).json({ error: 'id required' });
       const fields = toFields(body);
       const updated = await airtable(`${BASE}/${encodeURIComponent(TABLE)}`, {
