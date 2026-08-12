@@ -14,12 +14,22 @@
 // require a "work records" role, delivered as x-app-role from the SSO session:
 // Admin / Manager / Patroller/Supervisor can write; User is read-only. See canWrite() below.
 //
-// Env: AIRTABLE_PAT (read+write to the base), AIRTABLE_BASE (default below),
-//      COMPLAINTS_TABLE (default table id below).
+// Env: AIRTABLE_PAT (read+write to the Complaints base, AND read on the Employees base
+//      for the live assignee list), AIRTABLE_BASE (default below), COMPLAINTS_TABLE
+//      (default table id below), EMP_BASE / EMP_TABLE (Employees directory, defaults below).
 
 const PAT   = process.env.AIRTABLE_PAT;
 const BASE  = process.env.AIRTABLE_BASE || 'app6PnSWS8BMnGbPe';
 const TABLE = process.env.COMPLAINTS_TABLE || 'tblDuAOQ7ay26FmIa';
+
+// Assignee list is drawn LIVE from the Employees directory — "anyone who works
+// Complaints": org Owner, OR someone with "Complaints" in App Access AND a Complaints
+// Role of Admin / Manager / Patroller/Supervisor. Requires the PAT to ALSO have
+// data.records:read on the Employees base.
+const EMP_BASE  = process.env.EMP_BASE  || 'appraSoUXoTbhroG6';
+const EMP_TABLE = process.env.EMP_TABLE || 'tblUfWrGjHTHXszos';
+const EF = { name: 'fldtLjh72SJV8Uyfb', role: 'fldWRmtEbJ6tfyLX1', appAccess: 'fldiArCcZx8uGtGl8', complaintsRole: 'fldP8Ugq5oLW0i8w5', active: 'fldcHPqfxScpuUbZ6' };
+const WORK_ROLES = ['Admin', 'Manager', 'Patroller/Supervisor'];
 
 // Field IDs (stable even if a field is renamed; also dodges the trailing space in "Phone ").
 const F = {
@@ -105,24 +115,54 @@ function toFields(b) {
   return f;
 }
 
+// Live assignee list from the Employees directory = anyone who can work Complaints.
+// Returns sorted, de-duped names, or null on failure (caller falls back to defaults).
+async function getAssignees() {
+  try {
+    const names = new Set();
+    let offset;
+    do {
+      const qs = new URLSearchParams();
+      qs.set('pageSize', '100');
+      qs.set('returnFieldsByFieldId', 'true');
+      ['name', 'role', 'appAccess', 'complaintsRole', 'active'].forEach(k => qs.append('fields[]', EF[k]));
+      if (offset) qs.set('offset', offset);
+      const page = await airtable(`${EMP_BASE}/${encodeURIComponent(EMP_TABLE)}?${qs}`);
+      for (const rec of (page.records || [])) {
+        const f = rec.fields || {};
+        const name = f[EF.name];
+        if (!name) continue;
+        if (sel(f[EF.active]) === 'Inactive') continue;               // active only
+        const worksComplaints =
+          sel(f[EF.role]) === 'Owner' ||                              // owners work every app
+          (arr(f[EF.appAccess]).map(sel).includes('Complaints') &&    // has access AND
+           WORK_ROLES.includes(sel(f[EF.complaintsRole])));           // a write-level Complaints role
+        if (worksComplaints) names.add(name);
+      }
+      offset = page.offset;
+    } while (offset);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  } catch (_) { return null; }
+}
+
 async function getChoices() {
-  // Try the Meta API (needs schema.bases:read); fall back to defaults.
+  // reasons / statuses / received-by come from the table schema (Meta API); assignees
+  // come LIVE from the Employees directory. Each falls back to DEFAULT_CHOICES.
+  let reasons = DEFAULT_CHOICES.reasons, statuses = DEFAULT_CHOICES.statuses, channels = DEFAULT_CHOICES.channels;
   try {
     const j = await airtable(`meta/bases/${BASE}/tables`);
     const t = (j.tables || []).find(x => x.id === TABLE);
     if (t) {
       const byId = {}; (t.fields || []).forEach(fl => { byId[fl.id] = fl; });
       const opts = id => (byId[id]?.options?.choices || []).map(c => c.name);
-      const a = opts(F.assignedTo), r = opts(F.reason), s = opts(F.status), c = opts(F.receivedBy);
-      return {
-        assignees: a.length ? a : DEFAULT_CHOICES.assignees,
-        reasons:   r.length ? r : DEFAULT_CHOICES.reasons,
-        statuses:  s.length ? s : DEFAULT_CHOICES.statuses,
-        channels:  c.length ? c : DEFAULT_CHOICES.channels,
-      };
+      const r = opts(F.reason), s = opts(F.status), c = opts(F.receivedBy);
+      if (r.length) reasons = r;
+      if (s.length) statuses = s;
+      if (c.length) channels = c;
     }
-  } catch (_) { /* fall through */ }
-  return DEFAULT_CHOICES;
+  } catch (_) { /* keep defaults */ }
+  const assignees = (await getAssignees()) || DEFAULT_CHOICES.assignees;
+  return { assignees, reasons, statuses, channels };
 }
 
 async function fetchAll() {
