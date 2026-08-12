@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PATCH, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, x-user-role, x-app-role, x-user-name, x-user-id" }
+      ]
+    }
+  ]
+}
