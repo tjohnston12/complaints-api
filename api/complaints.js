@@ -15,8 +15,10 @@
 // Admin / Manager / Patroller/Supervisor can write; User is read-only. See canWrite() below.
 //
 // Env: AIRTABLE_PAT (read+write to the Complaints base, AND read on the Employees base
-//      for the live assignee list), AIRTABLE_BASE (default below), COMPLAINTS_TABLE
-//      (default table id below), EMP_BASE / EMP_TABLE (Employees directory, defaults below).
+//      for the live assignee list + assignee emails), AIRTABLE_BASE, COMPLAINTS_TABLE,
+//      EMP_BASE / EMP_TABLE (Employees directory, defaults below).
+//      RESEND_API_KEY + ASSIGN_FROM (verified sender) + COMPLAINTS_APP_URL — optional;
+//      when set, assigning a complaint emails the assignee. Unset = no email, app still works.
 
 const PAT   = process.env.AIRTABLE_PAT;
 const BASE  = process.env.AIRTABLE_BASE || 'app6PnSWS8BMnGbPe';
@@ -28,8 +30,14 @@ const TABLE = process.env.COMPLAINTS_TABLE || 'tblDuAOQ7ay26FmIa';
 // data.records:read on the Employees base.
 const EMP_BASE  = process.env.EMP_BASE  || 'appraSoUXoTbhroG6';
 const EMP_TABLE = process.env.EMP_TABLE || 'tblUfWrGjHTHXszos';
-const EF = { name: 'fldtLjh72SJV8Uyfb', role: 'fldWRmtEbJ6tfyLX1', appAccess: 'fldiArCcZx8uGtGl8', complaintsRole: 'fldP8Ugq5oLW0i8w5', active: 'fldcHPqfxScpuUbZ6' };
+const EF = { name: 'fldtLjh72SJV8Uyfb', role: 'fldWRmtEbJ6tfyLX1', appAccess: 'fldiArCcZx8uGtGl8', complaintsRole: 'fldP8Ugq5oLW0i8w5', active: 'fldcHPqfxScpuUbZ6', email: 'fldBggHLMX7abWiSK' };
 const WORK_ROLES = ['Admin', 'Manager', 'Patroller/Supervisor'];
+
+// Assignment email (Resend). If RESEND_API_KEY is unset the app still works —
+// assignment just won't notify. ASSIGN_FROM must be a Resend-verified sender.
+const RESEND_KEY  = process.env.RESEND_API_KEY;
+const ASSIGN_FROM = process.env.ASSIGN_FROM || 'MRDC Complaints <noreply@mrdc-htra.com>';
+const APP_URL     = process.env.COMPLAINTS_APP_URL || 'https://www.mrdc-htra.com/complaints/';
 
 // Field IDs (stable even if a field is renamed; also dodges the trailing space in "Phone ").
 const F = {
@@ -198,6 +206,63 @@ const canWrite = req =>
   WRITE_ROLES.includes(String(req.headers['x-app-role'] || '')) ||
   String(req.headers['x-user-role'] || '') === 'Owner';
 
+// Look up an employee's email by their (assignee) name in the Employees directory.
+async function lookupEmployeeEmail(name) {
+  if (!name) return '';
+  try {
+    const qs = new URLSearchParams();
+    qs.set('maxRecords', '1');
+    qs.set('returnFieldsByFieldId', 'true');
+    qs.append('fields[]', EF.name);
+    qs.append('fields[]', EF.email);
+    qs.set('filterByFormula', `{Name}='${String(name).replace(/'/g, "\\'")}'`);
+    const j = await airtable(`${EMP_BASE}/${encodeURIComponent(EMP_TABLE)}?${qs}`);
+    const r = (j.records || [])[0];
+    return r ? (r.fields[EF.email] || '') : '';
+  } catch (_) { return ''; }
+}
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+// Email a manager when a complaint is (newly) assigned to them. Best-effort:
+// returns true if sent, false if skipped/failed — never throws to the caller.
+async function sendAssignmentEmail(row, assigneeName, assignerName) {
+  try {
+    if (!RESEND_KEY || !assigneeName) return false;
+    const to = await lookupEmployeeEmail(assigneeName);
+    if (!to) return false;
+    const link = APP_URL + (APP_URL.indexOf('?') >= 0 ? '&' : '?') + 'id=' + encodeURIComponent(row.id);
+    const type = (row.reason || []).join(', ') || '—';
+    const who = (row.person || '').trim() || '(no name given)';
+    const msg = (row.message || '').trim();
+    const excerpt = msg.length > 600 ? msg.slice(0, 600) + '…' : (msg || '—');
+    const by = String(assignerName || '').trim();
+    const subject = `Complaint assigned to you — ${who}`;
+    const html =
+      `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1a1a1a;max-width:560px">` +
+      `<div style="background:#1E2B5E;color:#fff;padding:14px 18px;border-radius:10px 10px 0 0;border-bottom:3px solid #C9A84C">` +
+      `<div style="font-size:17px;font-weight:600">A complaint has been assigned to you</div></div>` +
+      `<div style="border:1px solid #DDD9D0;border-top:none;border-radius:0 0 10px 10px;padding:16px 18px">` +
+      `<p style="margin:0 0 12px">Hi ${esc(assigneeName)},${by ? ` ${esc(by)} has assigned` : ' You have been assigned'} a complaint in the MRDC Complaints app.</p>` +
+      `<table style="border-collapse:collapse;font-size:14px;margin:0 0 14px">` +
+      `<tr><td style="color:#6B6B6B;padding:3px 12px 3px 0">From</td><td><b>${esc(who)}</b></td></tr>` +
+      `<tr><td style="color:#6B6B6B;padding:3px 12px 3px 0">Type</td><td>${esc(type)}</td></tr>` +
+      `<tr><td style="color:#6B6B6B;padding:3px 12px 3px 0">Received</td><td>${esc(row.date || '—')}${row.receivedBy ? ' · ' + esc(row.receivedBy) : ''}</td></tr>` +
+      `<tr><td style="color:#6B6B6B;padding:3px 12px 3px 0">Status</td><td>${esc(row.status || 'Todo')}</td></tr>` +
+      `</table>` +
+      `<div style="color:#6B6B6B;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 4px">Message</div>` +
+      `<div style="background:#F7F7F5;border:1px solid #DDD9D0;border-radius:8px;padding:10px 12px;font-size:14px;white-space:pre-wrap;margin:0 0 16px">${esc(excerpt)}</div>` +
+      `<a href="${esc(link)}" style="display:inline-block;background:#1E2B5E;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:10px 18px;border-radius:8px">Open the complaint &rarr;</a>` +
+      `</div></div>`;
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: ASSIGN_FROM, to: [to], subject, html }),
+    });
+    return r.ok;
+  } catch (_) { return false; }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', corsOrigin(req));
   res.setHeader('Vary', 'Origin');
@@ -248,18 +313,35 @@ module.exports = async function handler(req, res) {
         method: 'POST',
         body: JSON.stringify({ records: [{ fields }], typecast: true, returnFieldsByFieldId: true }),
       });
-      return res.status(200).json({ row: shape(created.records?.[0] || { id: '', fields: {} }) });
+      const row = shape(created.records?.[0] || { id: '', fields: {} });
+      let notified = false;
+      if (body.assignedTo) notified = await sendAssignmentEmail(row, body.assignedTo, req.headers['x-user-name']);
+      return res.status(200).json({ row, notified });
     }
 
     if (req.method === 'PATCH') {
       if (!canWrite(req)) return res.status(403).json({ error: 'You have view-only access to Complaints.' });
       if (!body.id) return res.status(400).json({ error: 'id required' });
       const fields = toFields(body);
+      // Only notify when the assignee actually CHANGES to a new person (not on a
+      // status/action edit, and not if they were already assigned to them).
+      let prevAssigned = '';
+      if (body.assignedTo) {
+        try {
+          const cur = await airtable(`${BASE}/${encodeURIComponent(TABLE)}/${encodeURIComponent(body.id)}?returnFieldsByFieldId=true`);
+          prevAssigned = sel(cur.fields?.[F.assignedTo]);
+        } catch (_) { /* ignore — worst case we send one extra email */ }
+      }
       const updated = await airtable(`${BASE}/${encodeURIComponent(TABLE)}`, {
         method: 'PATCH',
         body: JSON.stringify({ records: [{ id: body.id, fields }], typecast: true, returnFieldsByFieldId: true }),
       });
-      return res.status(200).json({ row: shape(updated.records?.[0] || { id: body.id, fields: {} }) });
+      const row = shape(updated.records?.[0] || { id: body.id, fields: {} });
+      let notified = false;
+      if (body.assignedTo && body.assignedTo !== prevAssigned) {
+        notified = await sendAssignmentEmail(row, body.assignedTo, req.headers['x-user-name']);
+      }
+      return res.status(200).json({ row, notified });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });

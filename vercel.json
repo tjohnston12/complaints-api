@@ -8,5 +8,8 @@
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, x-user-role, x-app-role, x-user-name, x-user-id" }
       ]
     }
+  ],
+  "crons": [
+    { "path": "/api/reminders", "schedule": "0 10 * * 1" }
   ]
 }
