@@ -20,6 +20,9 @@
 //      RESEND_API_KEY + ASSIGN_FROM (verified sender) + COMPLAINTS_APP_URL — optional;
 //      when set, assigning a complaint emails the assignee. Unset = no email, app still works.
 
+// Calendar dates come from New Brunswick's clock, not UTC — see api/_when.js.
+const { todayAtlantic } = require('./_when');
+
 const PAT   = process.env.AIRTABLE_PAT;
 const BASE  = process.env.AIRTABLE_BASE || 'app6PnSWS8BMnGbPe';
 const TABLE = process.env.COMPLAINTS_TABLE || 'tblDuAOQ7ay26FmIa';
@@ -308,7 +311,7 @@ module.exports = async function handler(req, res) {
       if (!canWrite(req)) return res.status(403).json({ error: 'You have view-only access to Complaints.' });
       const fields = toFields(body);
       if (!body.status) fields[F.status] = 'Todo';
-      if (!body.date)   fields[F.date]   = new Date().toISOString().slice(0, 10);
+      if (!body.date)   fields[F.date]   = todayAtlantic();
       const created = await airtable(`${BASE}/${encodeURIComponent(TABLE)}`, {
         method: 'POST',
         body: JSON.stringify({ records: [{ fields }], typecast: true, returnFieldsByFieldId: true }),
